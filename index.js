@@ -8,6 +8,7 @@ import { SlashCommandEnumValue, enumTypes } from '../../../slash-commands/SlashC
 export { MODULE_NAME };
 
 const MODULE_NAME = 'namegen';
+const DEFAULT_STYLE = 'fantasy';
 // Prefer the README-recommended folder, but handle case-variant installs too
 const PRIMARY_PATH = 'third-party/SillyTavern-Namegen';
 const ALT_PATH = 'third-party/SillyTavern-NameGen';
@@ -140,6 +141,54 @@ async function ensureFantasticalLoaded() {
     }
 }
 
+async function ensureFakerLoaded() {
+    try {
+        if (!SillyTavern.libs) SillyTavern.libs = {};
+
+        if (SillyTavern.libs.faker && typeof SillyTavern.libs.faker === 'object') {
+            return SillyTavern.libs.faker;
+        }
+
+        const loadScript = (src) => new Promise((resolve, reject) => {
+            const script = document.createElement('script');
+            script.src = src;
+            script.async = true;
+            script.onload = () => resolve();
+            script.onerror = () => reject(new Error('Failed to load ' + src));
+            document.head.appendChild(script);
+        });
+        const candidates = [
+            `${BASE_URL}lib/faker.js`,
+            `/scripts/extensions/${PRIMARY_PATH}/lib/faker.js`,
+            `/scripts/extensions/${ALT_PATH}/lib/faker.js`,
+            `/${PRIMARY_PATH}/lib/faker.js`,
+            `/${ALT_PATH}/lib/faker.js`,
+        ];
+        let loaded = false;
+        let lastError;
+        for (const url of candidates) {
+            try {
+                await loadScript(url);
+                loaded = true;
+                break;
+            } catch (e) {
+                lastError = e;
+            }
+        }
+        if (!loaded) throw lastError || new Error('Failed to load faker lib');
+
+        const lib = window.faker;
+        if (!lib) throw new Error('Faker not found after loading local copy');
+
+        SillyTavern.libs.faker = lib;
+        return lib;
+    } catch (error) {
+        console.error('NameGen: Failed to load faker', error);
+        toastr.error('NameGen: Could not load faker library');
+        throw error;
+    }
+}
+
 function resolveGenerator(kind) {
     // Normalize and provide a few friendly aliases
     if (!kind) return 'human';
@@ -181,7 +230,32 @@ function normalizeGender(g) {
     return undefined;
 }
 
-async function generateName(kind, gender, options = {}) {
+async function generateName(style, kind, gender, options = {}) {
+    if (String(style || DEFAULT_STYLE).toLowerCase() === 'modern') {
+        const faker = await ensureFakerLoaded();
+        switch (String(kind || 'human').toLowerCase()) {
+            case 'company':
+                return faker.company.name();
+            case 'street':
+                return faker.location.street();
+            case 'city':
+                return faker.location.city();
+            case 'country':
+                return faker.location.country();
+            case 'bio':
+                return faker.person.bio();
+            case 'jobtitle':
+                return faker.person.jobTitle();
+            case 'human':
+            default:
+                const genderArg = normalizeGender(gender);
+                if (options.allowMultipleNames) {
+                    return faker.person.fullName({ sex: genderArg });
+                }
+                return faker.person.firstName({ sex: genderArg });
+        }
+    }
+
     const api = await ensureFantasticalLoaded();
 
     const resolved = resolveGenerator(kind);
@@ -270,7 +344,12 @@ function registerFunctionTools() {
             properties: {
                 kind: {
                     type: 'string',
-                    description: 'The generator to use, e.g. human, elf, dwarf, tavern, guild, adventure',
+                    description: 'For fantasy: human, elf, dwarf, tavern, etc. For modern: human, company, street, city, country, bio, jobtitle.',
+                },
+                style: {
+                    type: 'string',
+                    description: 'The style of the generation: "fantasy" (default) or "modern".',
+                    enum: ['fantasy', 'modern'],
                 },
                 gender: {
                     type: 'string',
@@ -287,13 +366,14 @@ function registerFunctionTools() {
         registerFunctionTool({
             name: 'GenerateName',
             displayName: 'Name Generator',
-            description: 'Generates a fantasy-style name using the fantastical library. Optional: allowMultipleNames (boolean) for human/settlements.',
+            description: 'Generates fantasy or modern names/data. Optional: allowMultipleNames (boolean) for human/settlements.',
             parameters: schema,
             action: async (args) => {
+                const style = args?.style || DEFAULT_STYLE;
                 const kind = args?.kind || 'human';
                 const gender = args?.gender; // leave undefined when not provided
                 const allowMultipleNames = typeof args?.allowMultipleNames === 'boolean' ? args.allowMultipleNames : undefined;
-                const name = await generateName(kind, gender, { allowMultipleNames });
+                const name = await generateName(style, kind, gender, { allowMultipleNames });
                 return name || 'Unknown';
             },
             formatMessage: () => '',
@@ -311,12 +391,13 @@ jQuery(async function () {
         name: 'generateName',
         aliases: ['genname', 'name'],
         callback: async (args, value) => {
+            const style = String(args.style || DEFAULT_STYLE);
             const kind = String(value || args.kind || 'human');
             const gender = args.gender ? String(args.gender) : undefined;
             const allowMultipleNames = args.allowMultipleNames !== undefined
                 ? String(args.allowMultipleNames).toLowerCase() === 'true'
                 : undefined;
-            const result = await generateName(kind, gender, { allowMultipleNames });
+            const result = await generateName(style, kind, gender, { allowMultipleNames });
             if (result) {
                 const inserted = insertNameIntoInput(result, { spaced: true });
                 if (inserted) {
@@ -326,9 +407,20 @@ jQuery(async function () {
             }
             return result;
         },
-        helpString: 'Generate a fantasy name (e.g., /generateName elf --gender female --allowMultipleNames true).',
+        helpString: 'Generate a fantasy or modern name/data (e.g., /generateName elf --style fantasy --gender female or /generateName --style modern --kind company).',
         returns: 'generated name',
         namedArgumentList: [
+            SlashCommandNamedArgument.fromProps({
+                name: 'style',
+                description: 'Generation style: fantasy or modern.',
+                isRequired: false,
+                typeList: [ARGUMENT_TYPE.STRING],
+                defaultValue: DEFAULT_STYLE,
+                enumProvider: (() => {
+                    const values = ['fantasy', 'modern'];
+                    return () => values.map(v => new SlashCommandEnumValue(v, v, enumTypes.string));
+                })(),
+            }),
             SlashCommandNamedArgument.fromProps({
                 name: 'gender',
                 description: 'Gender for gendered species',
@@ -343,7 +435,7 @@ jQuery(async function () {
             }),
             SlashCommandNamedArgument.fromProps({
                 name: 'kind',
-                description: 'Generator kind, e.g. human, elf, dwarf, tavern, guild, adventure',
+                description: 'For fantasy: human, elf, dwarf, tavern, etc. For modern: human, company, street, city, country, bio, jobtitle.',
                 isRequired: false,
                 typeList: [ARGUMENT_TYPE.STRING],
             }),
